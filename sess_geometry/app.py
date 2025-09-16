@@ -7,11 +7,12 @@ from copy import deepcopy
 from .geometry_utils import centroid_xy, bounds
 from .state import (
     AppState, ALIAS_TO_PARAM,
-    DEFAULT_ROOM_WORK_COLS, DEFAULT_AREA_WORK_COLS,
-    DEFAULT_ROOM_SRC_COLS,  DEFAULT_AREA_SRC_COLS
+    DEFAULT_ROOM_WORK_COLS, DEFAULT_AREA_WORK_COLS, DEFAULT_OPENING_WORK_COLS,
+    DEFAULT_ROOM_SRC_COLS,  DEFAULT_AREA_SRC_COLS,  DEFAULT_OPENING_SRC_COLS
 )
 from .io_bess import load_bess_export, save_work_geometry
 from .widgets.columns_picker import ColumnsPicker
+from .widgets.filter_dialog import FilterDialog
 
 TOL_AREA_PICK_PX     = 3
 TOL_ROOM_OUTLINE_PX  = 5
@@ -35,6 +36,9 @@ class App(tk.Tk):
         self._rebuilding = False; self._syncing = False
         self._sort_orders = {}; self._tree_anchor = {}
         self._edit_popup = None
+        self._drag_rect = None; self._drag_start = None; self._drag_cross = False
+        self._table_filters = {}; self._table_sources = {}
+        self._active_menu = None
 
         self._add_room_mode = None
         self._add_room_pts = []
@@ -60,6 +64,10 @@ class App(tk.Tk):
         self._grid_backup = {"rooms": {}, "areas": {}}
         self._grid_items = []
         self._grid_origin = (0.0, 0.0)
+
+        self.openings_tree = None
+        self.opening_work_cols_vars = {}
+        self.opening_src_cols_vars = {}
 
         self._build_ui()
         self._open_add_room_window()
@@ -111,8 +119,13 @@ class App(tk.Tk):
         rm_tree_fr = tk.Frame(rooms_section); rm_tree_fr.pack(fill="both", expand=True)
         self.rooms_tree = ttk.Treeview(rm_tree_fr, columns=(), show="headings", selectmode="extended")
         vsbR = ttk.Scrollbar(rm_tree_fr, orient="vertical", command=self.rooms_tree.yview)
-        self.rooms_tree.configure(yscrollcommand=vsbR.set)
-        self.rooms_tree.pack(side="left", fill="both", expand=True); vsbR.pack(side="right", fill="y")
+        hsbR = ttk.Scrollbar(rm_tree_fr, orient="horizontal", command=self.rooms_tree.xview)
+        self.rooms_tree.configure(yscrollcommand=vsbR.set, xscrollcommand=hsbR.set)
+        self.rooms_tree.grid(row=0, column=0, sticky="nsew")
+        vsbR.grid(row=0, column=1, sticky="ns")
+        hsbR.grid(row=1, column=0, sticky="ew")
+        rm_tree_fr.grid_rowconfigure(0, weight=1)
+        rm_tree_fr.grid_columnconfigure(0, weight=1)
 
         areas_section = tk.Frame(prop); areas_section.pack(fill="both", expand=True, padx=4, pady=(0,4))
         tk.Label(areas_section, text="Оболочки (рабочая модель)", anchor="w").pack(fill="x")
@@ -123,8 +136,29 @@ class App(tk.Tk):
         ar_tree_fr = tk.Frame(areas_section); ar_tree_fr.pack(fill="both", expand=True)
         self.areas_tree = ttk.Treeview(ar_tree_fr, columns=(), show="headings", selectmode="extended")
         vsbA = ttk.Scrollbar(ar_tree_fr, orient="vertical", command=self.areas_tree.yview)
-        self.areas_tree.configure(yscrollcommand=vsbA.set)
-        self.areas_tree.pack(side="left", fill="both", expand=True); vsbA.pack(side="right", fill="y")
+        hsbA = ttk.Scrollbar(ar_tree_fr, orient="horizontal", command=self.areas_tree.xview)
+        self.areas_tree.configure(yscrollcommand=vsbA.set, xscrollcommand=hsbA.set)
+        self.areas_tree.grid(row=0, column=0, sticky="nsew")
+        vsbA.grid(row=0, column=1, sticky="ns")
+        hsbA.grid(row=1, column=0, sticky="ew")
+        ar_tree_fr.grid_rowconfigure(0, weight=1)
+        ar_tree_fr.grid_columnconfigure(0, weight=1)
+
+        openings_section = tk.Frame(prop); openings_section.pack(fill="both", expand=True, padx=4, pady=(0,4))
+        tk.Label(openings_section, text="Открывания (рабочая модель)", anchor="w").pack(fill="x")
+        op_btns = tk.Frame(openings_section); op_btns.pack(fill="x", pady=(2,2))
+        tk.Button(op_btns, text="Удалить открывание", command=self._remove_selected_openings).pack(side="left")
+        tk.Button(op_btns, text="Сбросить из источника", command=self._reset_openings_from_source).pack(side="left", padx=4)
+        op_tree_fr = tk.Frame(openings_section); op_tree_fr.pack(fill="both", expand=True)
+        self.openings_tree = ttk.Treeview(op_tree_fr, columns=(), show="headings", selectmode="extended")
+        vsbO = ttk.Scrollbar(op_tree_fr, orient="vertical", command=self.openings_tree.yview)
+        hsbO = ttk.Scrollbar(op_tree_fr, orient="horizontal", command=self.openings_tree.xview)
+        self.openings_tree.configure(yscrollcommand=vsbO.set, xscrollcommand=hsbO.set)
+        self.openings_tree.grid(row=0, column=0, sticky="nsew")
+        vsbO.grid(row=0, column=1, sticky="ns")
+        hsbO.grid(row=1, column=0, sticky="ew")
+        op_tree_fr.grid_rowconfigure(0, weight=1)
+        op_tree_fr.grid_columnconfigure(0, weight=1)
 
         self._rooms_src_win = None; self._areas_src_win = None
         self.rooms_all_tree = None; self.areas_all_tree = None
@@ -143,7 +177,8 @@ class App(tk.Tk):
         top.pack(fill="x", padx=8, pady=(8,4))
         tk.Button(top, text="Открыть JSON…", command=self._open_json).pack(side="left")
         tk.Button(top, text="Отменить", command=self._undo).pack(side="left", padx=(8,0))
-        tk.Button(top, text="Вернуть",  command=self._redo).pack(side="left", padx=(6,8))
+        tk.Button(top, text="Вернуть",  command=self._redo).pack(side="left", padx=(6,0))
+        tk.Button(top, text="Столбцы…", command=self._open_columns_menu).pack(side="left", padx=(8,8))
         self.file_label = tk.Label(top, text="", anchor="w")
         self.file_label.pack(side="left", fill="x", expand=True, padx=8)
 
@@ -164,7 +199,7 @@ class App(tk.Tk):
 
         self.level_list.bind("<<ListboxSelect>>", self._on_level_changed)
 
-        for t in (self.rooms_tree, self.areas_tree):
+        for t in (self.rooms_tree, self.areas_tree, self.openings_tree):
             self._bind_tree_common(t)
         self.rooms_tree.bind("<Double-1>", lambda e: self._try_edit_combo(e, self.rooms_tree), add="+")
         self.areas_tree.bind("<Double-1>", lambda e: self._try_edit_combo(e, self.areas_tree), add="+")
@@ -571,10 +606,18 @@ class App(tk.Tk):
         for it in self.state.work_rooms:
             for k in (it.get("params") or {}).keys():
                 r_work_keys.add(k)
+        for items in self.state.work_shafts.values():
+            for it in items:
+                for k in (it.get("params") or {}).keys():
+                    r_work_keys.add(k)
         a_work_keys = set(["id","name","number","label","BESS_level"])
         for it in self.state.work_areas:
             for k in (it.get("params") or {}).keys():
                 a_work_keys.add(k)
+        o_work_keys = set(["id","name","category","from_room","to_room","BESS_level"])
+        for it in self.state.work_openings:
+            for k in (it.get("params") or {}).keys():
+                o_work_keys.add(k)
         r_src_keys = set(["id","level","name","number","label"])
         for it in self.state.base_rooms:
             for k in (it.get("params") or {}).keys():
@@ -583,11 +626,17 @@ class App(tk.Tk):
         for it in self.state.base_areas:
             for k in (it.get("params") or {}).keys():
                 a_src_keys.add(k)
+        o_src_keys = set(["id","level","name","category","from_room","to_room"])
+        for it in self.state.base_openings:
+            for k in (it.get("params") or {}).keys():
+                o_src_keys.add(k)
 
         self.room_work_cols_vars = build_vars(r_work_keys, DEFAULT_ROOM_WORK_COLS)
         self.area_work_cols_vars = build_vars(a_work_keys, DEFAULT_AREA_WORK_COLS)
+        self.opening_work_cols_vars = build_vars(o_work_keys, DEFAULT_OPENING_WORK_COLS)
         self.room_src_cols_vars  = build_vars(r_src_keys,  DEFAULT_ROOM_SRC_COLS)
         self.area_src_cols_vars  = build_vars(a_src_keys,  DEFAULT_AREA_SRC_COLS)
+        self.opening_src_cols_vars = build_vars(o_src_keys, DEFAULT_OPENING_SRC_COLS)
 
     def _open_room_work_cols(self):
         ColumnsPicker(self, "Столбцы рабочих помещений", self.room_work_cols_vars, self._refresh_tables)
@@ -595,11 +644,34 @@ class App(tk.Tk):
     def _open_area_work_cols(self):
         ColumnsPicker(self, "Столбцы рабочей оболочки", self.area_work_cols_vars, self._refresh_tables)
 
+    def _open_opening_work_cols(self):
+        ColumnsPicker(self, "Столбцы рабочих открываний", self.opening_work_cols_vars, self._refresh_tables)
+
     def _open_room_src_cols(self):
         ColumnsPicker(self, "Столбцы источника (помещения)", self.room_src_cols_vars, self._refresh_tables)
 
     def _open_area_src_cols(self):
         ColumnsPicker(self, "Столбцы источника (оболочка)", self.area_src_cols_vars, self._refresh_tables)
+
+    def _open_opening_src_cols(self):
+        ColumnsPicker(self, "Столбцы источника (открывания)", self.opening_src_cols_vars, self._refresh_tables)
+
+    def _open_columns_menu(self):
+        if self._active_menu:
+            self._active_menu.unpost()
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Помещения (рабочие)", command=self._open_room_work_cols)
+        menu.add_command(label="Оболочки (рабочие)", command=self._open_area_work_cols)
+        menu.add_command(label="Открывания (рабочие)", command=self._open_opening_work_cols)
+        menu.add_separator()
+        menu.add_command(label="Помещения (источник)", command=self._open_room_src_cols)
+        menu.add_command(label="Оболочки (источник)", command=self._open_area_src_cols)
+        menu.add_command(label="Открывания (источник)", command=self._open_opening_src_cols)
+        self._active_menu = menu
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
 
     # ---------- undo/redo ----------
     def _snapshot(self):
@@ -608,20 +680,26 @@ class App(tk.Tk):
         s.base_levels = deepcopy(self.state.base_levels)
         s.base_rooms  = deepcopy(self.state.base_rooms)
         s.base_areas  = deepcopy(self.state.base_areas)
+        s.base_openings = deepcopy(self.state.base_openings)
+        s.base_shafts = deepcopy(self.state.base_shafts)
         s.work_levels = deepcopy(self.state.work_levels)
         s.work_rooms  = deepcopy(self.state.work_rooms)
         s.work_areas  = deepcopy(self.state.work_areas)
+        s.work_openings = deepcopy(self.state.work_openings)
+        s.work_shafts = deepcopy(self.state.work_shafts)
         s.selected_level = self.state.selected_level
         s.room_work_cols = self.state.room_work_cols[:]
         s.area_work_cols = self.state.area_work_cols[:]
+        s.opening_work_cols = self.state.opening_work_cols[:]
         s.room_src_cols  = self.state.room_src_cols[:]
         s.area_src_cols  = self.state.area_src_cols[:]
+        s.opening_src_cols = self.state.opening_src_cols[:]
         return s
 
     def _apply_snapshot(self, s):
         self.state = s
         self._clear_selection()
-        self._rebuild_levels_list()
+        self._rebuild_levels_list(select_name=self.state.selected_level)
         self._fill_all_tables()
         self._redraw(True)
 
@@ -651,13 +729,15 @@ class App(tk.Tk):
         if not path:
             return
         try:
-            meta, base_lv, base_rooms, base_areas = load_bess_export(path)
-            self.state.set_source(meta, base_lv, base_rooms, base_areas)
+            meta, base_lv, base_rooms, base_areas, base_openings, base_shafts = load_bess_export(path)
+            self.state.set_source(meta, base_lv, base_rooms, base_areas, base_openings, base_shafts)
         except Exception as e:
             messagebox.showerror("Ошибка чтения JSON", str(e)); return
 
         self.file_label.config(text=os.path.basename(path))
         self._undo_stack[:] = []; self._redo_stack[:] = []
+        self._table_filters = {}
+        self._table_sources = {}
         self._rebuild_columns_models()
         self._rebuild_levels_list(select_index=0)
         self._fill_all_tables()
@@ -670,20 +750,32 @@ class App(tk.Tk):
         if not path:
             return
         try:
-            save_work_geometry(path, self.state.meta, self.state.work_levels, self.state.work_rooms, self.state.work_areas)
+            save_work_geometry(path, self.state.meta, self.state.work_levels, self.state.work_rooms, self.state.work_areas, self.state.work_openings, self.state.work_shafts)
             messagebox.showinfo("Сохранено", f"Рабочая геометрия записана:\n{os.path.basename(path)}")
         except Exception as e:
             messagebox.showerror("Ошибка записи", str(e))
 
     # ---------- levels ----------
-    def _rebuild_levels_list(self, select_index=None):
+    def _rebuild_levels_list(self, select_index=None, select_name=None):
         self.level_list.delete(0, "end")
         for n in self.state.levels_sorted_names(self.state.work_levels):
             self.level_list.insert("end", n)
-        if select_index is not None and self.level_list.size() > 0:
-            idx = max(0, min(select_index, self.level_list.size()-1))
+        size = self.level_list.size()
+        target_idx = None
+        if select_name and size > 0:
+            for i in range(size):
+                if self.level_list.get(i) == select_name:
+                    target_idx = i
+                    break
+        if target_idx is None and select_index is not None and size > 0:
+            target_idx = max(0, min(select_index, size-1))
+        if target_idx is None and size > 0:
+            target_idx = 0
+        if target_idx is not None:
             self.level_list.selection_clear(0, "end")
-            self.level_list.selection_set(idx)
+            self.level_list.selection_set(target_idx)
+            self.level_list.see(target_idx)
+        self.state.selected_level = self._current_level()
 
     def _current_level(self):
         sel = self.level_list.curselection()
@@ -714,12 +806,30 @@ class App(tk.Tk):
     def _apply_columns(self, tree, cols):
         tree["columns"] = cols
         for c in cols:
-            tree.heading(c, text=c, command=lambda cc=c, tt=tree: self._sort_tree(tt, cc))
-            tree.column(c, width=(150 if c in ("BESS_level","BESS_Upper_level","BESS_Room_Height") else 140), anchor="w")
+            tree.heading(c, text=c, command=lambda cc=c, tt=tree: self._on_heading_click(tt, cc))
+            width = 170 if c in ("from_room","to_room") else (150 if c in ("BESS_level","BESS_Upper_level","BESS_Room_Height") else 140)
+            tree.column(c, width=width, anchor="w")
 
-    def _sort_tree(self, tree, col):
-        prev = self._sort_orders.get(tree, ("", False))
-        reverse = not prev[1] if prev[0] == col else False
+    def _on_heading_click(self, tree, col):
+        if self._active_menu:
+            self._active_menu.unpost()
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Сортировка ↑", command=lambda: self._sort_tree(tree, col, reverse=False))
+        menu.add_command(label="Сортировка ↓", command=lambda: self._sort_tree(tree, col, reverse=True))
+        menu.add_separator()
+        menu.add_command(label="Фильтр…", command=lambda: self._open_filter_dialog(tree, col))
+        if self._table_filters.get(tree, {}).get(col):
+            menu.add_command(label="Сбросить фильтр", command=lambda: self._clear_filter(tree, col))
+        self._active_menu = menu
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def _sort_tree(self, tree, col, reverse=None):
+        if reverse is None:
+            prev = self._sort_orders.get(tree, ("", False))
+            reverse = not prev[1] if prev[0] == col else False
         self._sort_orders[tree] = (col, reverse)
 
         def _num(x):
@@ -733,29 +843,82 @@ class App(tk.Tk):
         for idx, (_, iid) in enumerate(rows):
             tree.move(iid, "", idx)
 
+    def _open_filter_dialog(self, tree, col):
+        src = self._table_sources.get(tree)
+        if not src:
+            return
+        items, cols, is_work = src
+        values = set()
+        for it in items:
+            values.add(self._item_value(it, col, is_work))
+        ordered = sorted(values, key=lambda v: v.lower() if isinstance(v, str) else str(v).lower())
+        current = None
+        if tree in self._table_filters:
+            current = self._table_filters[tree].get(col)
+
+        def _apply(selected):
+            self._apply_filter(tree, col, selected)
+
+        FilterDialog(self, f"Фильтр: {col}", ordered, current, _apply)
+        self._active_menu = None
+
+    def _apply_filter(self, tree, col, selected):
+        filters = self._table_filters.setdefault(tree, {})
+        if selected is None:
+            filters.pop(col, None)
+        else:
+            filters[col] = set(selected)
+        self._refresh_tables()
+
+    def _clear_filter(self, tree, col):
+        if tree in self._table_filters and col in self._table_filters[tree]:
+            self._table_filters[tree].pop(col, None)
+            self._refresh_tables()
+
+    def _item_id(self, item):
+        if isinstance(item, dict):
+            return str(item.get("id") or item.get("unique_id") or id(item))
+        return str(id(item))
+
+    def _item_value(self, item, key, is_work):
+        if is_work:
+            prs = item.get("params") or {}
+            if key == "BESS_Room_Height":
+                return str(self.state.room_height_m(item))
+            if key in item and key not in ("params","outer_xy_m","inner_loops_xy_m"):
+                return str(item.get(key, ""))
+            alias = ALIAS_TO_PARAM.get(key, key)
+            return str(prs.get(alias, ""))
+        else:
+            if key in item and key not in ("params","outer_xy_m","inner_loops_xy_m"):
+                return str(item.get(key, ""))
+            return str((item.get("params") or {}).get(key, ""))
+
     def _fill_one_table(self, tree, items, cols, *, is_work):
         self._rebuilding = True
         try:
             self._apply_columns(tree, cols)
             tree.delete(*tree.get_children(""))
+            src_items = list(items or [])
+            self._table_sources[tree] = (src_items, list(cols), is_work)
+            tree_filters = self._table_filters.setdefault(tree, {})
+            for key in list(tree_filters.keys()):
+                if key not in cols:
+                    tree_filters.pop(key, None)
 
-            def val(it, k):
-                if is_work:
-                    prs = it.get("params") or {}
-                    if k == "BESS_Room_Height":
-                        return str(self.state.room_height_m(it))
-                    key = ALIAS_TO_PARAM.get(k, k)
-                    if k in ("id","name","number","label"):
-                        return str(it.get(k,""))
-                    return str(prs.get(key, ""))
-                else:
-                    if k in ("id","level","name","number","label"):
-                        return str(it.get(k,""))
-                    return str((it.get("params") or {}).get(k, ""))
-
-            for it in items:
-                row = [val(it, k) for k in cols]
-                tree.insert("", "end", iid=str(it.get("id","")), values=row)
+            for it in src_items:
+                include = True
+                row = []
+                for col in cols:
+                    value = self._item_value(it, col, is_work)
+                    allowed = tree_filters.get(col)
+                    if allowed is not None and value not in allowed:
+                        include = False
+                        break
+                    row.append(value)
+                if not include:
+                    continue
+                tree.insert("", "end", iid=self._item_id(it), values=row)
         finally:
             self._rebuilding = False
 
@@ -771,11 +934,17 @@ class App(tk.Tk):
     def _refill_level_tables(self):
         lvl = self._current_level()
         r_items = [r for r in self.state.work_rooms if (r.get("params",{}).get("BESS_level","") == lvl)]
+        shaft_items = list(self.state.work_shafts.get(lvl, []))
+        combined_rooms = r_items + shaft_items
         a_items = [a for a in self.state.work_areas if (a.get("params",{}).get("BESS_level","") == lvl)]
+        o_items = [o for o in self.state.work_openings if (o.get("params",{}).get("BESS_level","") == lvl)]
         room_cols = [k for k,v in self.room_work_cols_vars.items() if v.get()] or DEFAULT_ROOM_WORK_COLS
         area_cols = [k for k,v in self.area_work_cols_vars.items() if v.get()] or DEFAULT_AREA_WORK_COLS
-        self._fill_one_table(self.rooms_tree, r_items, room_cols, is_work=True)
+        opening_cols = [k for k,v in self.opening_work_cols_vars.items() if v.get()] or DEFAULT_OPENING_WORK_COLS
+        self._fill_one_table(self.rooms_tree, combined_rooms, room_cols, is_work=True)
         self._fill_one_table(self.areas_tree, a_items, area_cols, is_work=True)
+        if self.openings_tree:
+            self._fill_one_table(self.openings_tree, o_items, opening_cols, is_work=True)
 
     def _refresh_tables(self):
         self._fill_all_tables(); self._redraw(False)
@@ -819,6 +988,25 @@ class App(tk.Tk):
         self.state.remove_areas(ids)
         self._fill_all_tables(); self._clear_selection(); self._redraw(False)
 
+    def _remove_selected_openings(self):
+        if not self.openings_tree:
+            return
+        ids = set(self.openings_tree.selection()) or {
+            i for i in self._sel_ids if any(str(o.get("id")) == i for o in self.state.work_openings)
+        }
+        if not ids:
+            return
+        self._push_undo()
+        self.state.remove_openings(ids)
+        self._fill_all_tables(); self._clear_selection(); self._redraw(False)
+
+    def _reset_openings_from_source(self):
+        self._push_undo()
+        self.state.reset_openings()
+        self._rebuild_columns_models()
+        self._fill_all_tables()
+        self._redraw(False)
+
     def _open_rooms_source_window(self):
         if self._rooms_src_win:
             self._rooms_src_win.lift(); return
@@ -828,8 +1016,13 @@ class App(tk.Tk):
         tree_fr = tk.Frame(pan)
         self.rooms_all_tree = ttk.Treeview(tree_fr, columns=(), show="headings", selectmode="extended")
         vsb = ttk.Scrollbar(tree_fr, orient="vertical", command=self.rooms_all_tree.yview)
-        self.rooms_all_tree.configure(yscrollcommand=vsb.set)
-        self.rooms_all_tree.pack(side="left", fill="both", expand=True); vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(tree_fr, orient="horizontal", command=self.rooms_all_tree.xview)
+        self.rooms_all_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.rooms_all_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_fr.grid_rowconfigure(0, weight=1)
+        tree_fr.grid_columnconfigure(0, weight=1)
         pan.add(tree_fr, width=300)
         cv_fr = tk.Frame(pan)
         self._rooms_src_canvas = tk.Canvas(cv_fr, bg="white")
@@ -848,8 +1041,13 @@ class App(tk.Tk):
 
     def _close_rooms_source_window(self):
         if self._rooms_src_win:
+            tree = self.rooms_all_tree
             self._rooms_src_win.destroy()
             self._rooms_src_win = None
+            if tree in self._table_filters:
+                self._table_filters.pop(tree, None)
+            if tree in self._table_sources:
+                self._table_sources.pop(tree, None)
             self.rooms_all_tree = None
             self._rooms_src_canvas = None
 
@@ -857,7 +1055,7 @@ class App(tk.Tk):
         if not self._rooms_src_canvas or not self.rooms_all_tree:
             return
         sel = set(self.rooms_all_tree.selection())
-        items = [r for r in self.state.base_rooms if str(r.get("id")) in sel] or self.state.base_rooms
+        items = [r for r in self.state.base_rooms if self._item_id(r) in sel] or self.state.base_rooms
         self._draw_preview(self._rooms_src_canvas, items, outline="#333", fill="#bfe3ff")
 
     def _open_areas_source_window(self):
@@ -869,8 +1067,13 @@ class App(tk.Tk):
         tree_fr = tk.Frame(pan)
         self.areas_all_tree = ttk.Treeview(tree_fr, columns=(), show="headings", selectmode="extended")
         vsb = ttk.Scrollbar(tree_fr, orient="vertical", command=self.areas_all_tree.yview)
-        self.areas_all_tree.configure(yscrollcommand=vsb.set)
-        self.areas_all_tree.pack(side="left", fill="both", expand=True); vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(tree_fr, orient="horizontal", command=self.areas_all_tree.xview)
+        self.areas_all_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.areas_all_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_fr.grid_rowconfigure(0, weight=1)
+        tree_fr.grid_columnconfigure(0, weight=1)
         pan.add(tree_fr, width=300)
         cv_fr = tk.Frame(pan)
         self._areas_src_canvas = tk.Canvas(cv_fr, bg="white")
@@ -889,8 +1092,13 @@ class App(tk.Tk):
 
     def _close_areas_source_window(self):
         if self._areas_src_win:
+            tree = self.areas_all_tree
             self._areas_src_win.destroy()
             self._areas_src_win = None
+            if tree in self._table_filters:
+                self._table_filters.pop(tree, None)
+            if tree in self._table_sources:
+                self._table_sources.pop(tree, None)
             self.areas_all_tree = None
             self._areas_src_canvas = None
 
@@ -898,7 +1106,7 @@ class App(tk.Tk):
         if not self._areas_src_canvas or not self.areas_all_tree:
             return
         sel = set(self.areas_all_tree.selection())
-        items = [a for a in self.state.base_areas if str(a.get("id")) in sel] or self.state.base_areas
+        items = [a for a in self.state.base_areas if self._item_id(a) in sel] or self.state.base_areas
         self._draw_preview(self._areas_src_canvas, items, outline="#D22", fill="")
 
     def _draw_preview(self, cv, items, outline="#333", fill=""):
@@ -933,15 +1141,27 @@ class App(tk.Tk):
         if rid not in self._id2canvas:
             return
         kind, base = self._id2canvas[rid]
-        oc, ow = self._orig_outline.get(rid, ("#333" if kind=="room" else "#D22", 2 if kind=="room" else 4))
+        if kind == "room":
+            default_outline = ("#333", 2)
+        elif kind == "area":
+            default_outline = ("#D22", 4)
+        elif kind == "shaft":
+            default_outline = ("#1D4ED8", 2)
+        else:
+            default_outline = ("#F97316", 3)
+        oc, ow = self._orig_outline.get(rid, default_outline)
         fill0 = self._orig_fill.get(rid, "")
         if on:
             if kind == "room":
                 self.canvas.itemconfigure(base, outline="#0078D7", width=4, fill="#bfe3ff", stipple="gray25")
+            elif kind == "shaft":
+                self.canvas.itemconfigure(base, outline="#0078D7", width=4, fill="#60A5FA", stipple="gray25")
             else:
                 self.canvas.itemconfigure(base, outline="#0078D7", width=6)
         else:
             if kind == "room":
+                self.canvas.itemconfigure(base, outline=oc, width=ow, fill=fill0, stipple="")
+            elif kind == "shaft":
                 self.canvas.itemconfigure(base, outline=oc, width=ow, fill=fill0, stipple="")
             else:
                 self.canvas.itemconfigure(base, outline=oc, width=ow)
@@ -953,7 +1173,7 @@ class App(tk.Tk):
         self._sel_ids.clear()
         self._syncing = True
         try:
-            for t in (self.rooms_tree, self.areas_tree, self.rooms_all_tree, self.areas_all_tree):
+            for t in (self.rooms_tree, self.areas_tree, self.openings_tree, self.rooms_all_tree, self.areas_all_tree):
                 try:
                     t.selection_remove(*t.selection())
                 except Exception:
@@ -964,7 +1184,7 @@ class App(tk.Tk):
     def _sync_tables_to_target(self, target_ids):
         self._syncing = True
         try:
-            for t in (self.rooms_tree, self.areas_tree, self.rooms_all_tree, self.areas_all_tree):
+            for t in (self.rooms_tree, self.areas_tree, self.openings_tree, self.rooms_all_tree, self.areas_all_tree):
                 if not t:
                     continue
                 ch = set(t.get_children(""))
@@ -1008,7 +1228,7 @@ class App(tk.Tk):
 
         self._syncing = True
         try:
-            for other in (self.rooms_tree, self.areas_tree, self.rooms_all_tree, self.areas_all_tree):
+            for other in (self.rooms_tree, self.areas_tree, self.openings_tree, self.rooms_all_tree, self.areas_all_tree):
                 if other is not t:
                     other.selection_remove(*other.selection())
         finally:
@@ -1064,12 +1284,15 @@ class App(tk.Tk):
             self._remove_selected_rooms()
         elif w in (self.areas_tree, self.areas_all_tree):
             self._remove_selected_areas()
+        elif w is self.openings_tree:
+            self._remove_selected_openings()
         elif w is self.canvas:
             if not self._sel_ids:
                 return
             self._push_undo()
             self.state.remove_rooms(self._sel_ids)
             self.state.remove_areas(self._sel_ids)
+            self.state.remove_openings(self._sel_ids)
             self._fill_all_tables(); self._clear_selection(); self._redraw(False)
 
     def _on_delete_key(self, _e):
@@ -1094,6 +1317,9 @@ class App(tk.Tk):
             return
         if self.areas_tree.selection():
             self._remove_selected_areas()
+            return
+        if self.openings_tree and self.openings_tree.selection():
+            self._remove_selected_openings()
             return
         if self._sel_ids:
             self._ctx_widget = self.canvas
@@ -1175,6 +1401,8 @@ class App(tk.Tk):
                 aid = a.get("id")
                 pts = self._grid_backup["areas"].get(aid, a.get("outer_xy_m", []))
                 items.append({"outer_xy_m": pts})
+            for o in self.state.work_openings:
+                items.append({"outer_xy_m": o.get("outer_xy_m", [])})
             if items:
                 xmin, ymin, xmax, ymax = bounds(items)
                 self._grid_origin = (
@@ -1432,6 +1660,20 @@ class App(tk.Tk):
             rid, kind = self._canvas2rid.get(hits[-1], (None, None))
             if kind == "area":
                 return rid, "area"
+        hits = [i for i in self.canvas.find_overlapping(x-TOL_AREA_PICK_PX, y-TOL_AREA_PICK_PX,
+                                                        x+TOL_AREA_PICK_PX, y+TOL_AREA_PICK_PX)
+                if "opening" in self.canvas.gettags(i)]
+        if hits:
+            rid, kind = self._canvas2rid.get(hits[-1], (None, None))
+            if kind == "opening":
+                return rid, "opening"
+        hits = [i for i in self.canvas.find_overlapping(x-TOL_AREA_PICK_PX, y-TOL_AREA_PICK_PX,
+                                                        x+TOL_AREA_PICK_PX, y+TOL_AREA_PICK_PX)
+                if "shaft" in self.canvas.gettags(i)]
+        if hits:
+            rid, kind = self._canvas2rid.get(hits[-1], (None, None))
+            if kind == "shaft":
+                return rid, "shaft"
         return None, None
 
     def _on_lmb_down(self, e):
@@ -1444,6 +1686,7 @@ class App(tk.Tk):
             self._edit_area_click(e)
             return
         self._drag_start = (e.x, e.y)
+        self._drag_cross = False
 
     def _on_lmb_drag(self, e):
         if self._add_room_mode or self._edit_area_mode:
@@ -1451,26 +1694,41 @@ class App(tk.Tk):
         if not self._drag_start:
             return
         x0, y0 = self._drag_start; x1, y1 = e.x, e.y
+        cross = x1 < x0
+        outline = "#2563EB" if not cross else "#16A34A"
+        dash = () if not cross else (4, 2)
         if getattr(self, "_drag_rect", None) is None:
-            self._drag_rect = self.canvas.create_rectangle(x0, y0, x1, y1, outline="#0078D7", dash=(4,2))
+            self._drag_rect = self.canvas.create_rectangle(x0, y0, x1, y1, outline=outline, dash=dash, fill="")
         else:
             self.canvas.coords(self._drag_rect, x0, y0, x1, y1)
+            self.canvas.itemconfigure(self._drag_rect, outline=outline, dash=dash)
+        self._drag_cross = cross
 
     def _on_lmb_up(self, e):
         if self._add_room_mode or self._edit_area_mode:
             return
         if getattr(self, "_drag_rect", None) is not None:
             x0, y0 = self._drag_start; x1, y1 = e.x, e.y
-            if x0 > x1: x0, x1 = x1, x0
-            if y0 > y1: y0, y1 = y1, y0
+            cross = self._drag_cross
+            x_min, x_max = (x1, x0) if cross and x1 < x0 else (min(x0, x1), max(x0, x1))
+            y_min, y_max = (y1, y0) if cross and y1 < y0 else (min(y0, y1), max(y0, y1))
             additive = (e.state & 0x0004) != 0
             ids = set()
-            for item in self.canvas.find_overlapping(x0, y0, x1, y1):
+            for item in self.canvas.find_overlapping(x_min, y_min, x_max, y_max):
                 if "geom" in self.canvas.gettags(item):
                     rid_kind = self._canvas2rid.get(item)
                     if rid_kind:
-                        rid, _ = rid_kind; ids.add(rid)
+                        rid, _ = rid_kind
+                        bbox = self.canvas.bbox(item)
+                        if not bbox:
+                            continue
+                        if not cross:
+                            if bbox[0] >= x_min and bbox[1] >= y_min and bbox[2] <= x_max and bbox[3] <= y_max:
+                                ids.add(rid)
+                        else:
+                            ids.add(rid)
             self.canvas.delete(self._drag_rect); self._drag_rect = None; self._drag_start = None
+            self._drag_cross = False
             if ids: self._select_ids(ids, additive=additive)
             else:
                 if not additive: self._clear_selection()
@@ -1486,10 +1744,12 @@ class App(tk.Tk):
         level = self._current_level()
         rooms = [r for r in self.state.work_rooms if (r.get("params",{}).get("BESS_level","") == level)]
         areas = [a for a in self.state.work_areas if (a.get("params",{}).get("BESS_level","") == level)]
+        openings = [o for o in self.state.work_openings if (o.get("params",{}).get("BESS_level","") == level)]
+        shafts = list(self.state.work_shafts.get(level, []))
         c = self.canvas
 
         if force_fit:
-            minx, miny, maxx, maxy = bounds(rooms+areas)
+            minx, miny, maxx, maxy = bounds(rooms+areas+openings+shafts)
             w = max(maxx-minx, 1e-9); h = max(maxy-miny, 1e-9)
             cw = max(c.winfo_width(), 100); ch = max(c.winfo_height(), 100)
             m = 40; sx = (cw - m)/w; sy = (ch - m)/h
@@ -1510,13 +1770,13 @@ class App(tk.Tk):
             flat = []
             for x, y in r["outer_xy_m"]:
                 X, Y = self._to_screen(x, y); flat += [X, Y]
-            pid = c.create_polygon(flat, outline="#333", fill=col, width=2, tags=("geom","room", str(r["id"])))
+            rid = self._item_id(r)
+            pid = c.create_polygon(flat, outline="#333", fill=col, width=2, tags=("geom","room", rid))
             for h in r.get("inner_loops_xy_m", []):
                 flat_h = []
                 for x, y in h:
                     X, Y = self._to_screen(x, y); flat_h += [X, Y]
                 c.create_polygon(flat_h, outline="#333", fill="", width=1, tags=("geom","room_hole"))
-            rid = str(r["id"])
             self._id2canvas[rid] = ("room", pid); self._canvas2rid[pid] = (rid, "room")
             self._orig_fill[rid] = col; self._orig_outline[rid] = ("#333", 2)
 
@@ -1524,14 +1784,65 @@ class App(tk.Tk):
             flat = []
             for x, y in a["outer_xy_m"]:
                 X, Y = self._to_screen(x, y); flat += [X, Y]
-            pid = c.create_polygon(flat, outline="#D22", fill="", width=4, tags=("geom","area", str(a["id"])))
-            rid = str(a["id"])
+            rid = self._item_id(a)
+            pid = c.create_polygon(flat, outline="#D22", fill="", width=4, tags=("geom","area", rid))
             self._id2canvas[rid] = ("area", pid); self._canvas2rid[pid] = (rid, "area")
             self._orig_outline[rid] = ("#D22", 4); self._orig_fill[rid] = ""
+
+        for op in openings:
+            outer = op.get("outer_xy_m") or []
+            if len(outer) < 2:
+                continue
+            flat = []
+            for x, y in outer:
+                X, Y = self._to_screen(x, y); flat += [X, Y]
+            rid = self._item_id(op)
+            pid = c.create_polygon(flat, outline="#F97316", fill="", width=3, tags=("geom","opening", rid))
+            self._id2canvas[rid] = ("opening", pid); self._canvas2rid[pid] = (rid, "opening")
+            self._orig_outline[rid] = ("#F97316", 3); self._orig_fill[rid] = ""
+
+        for sh in shafts:
+            outer = sh.get("outer_xy_m") or []
+            if len(outer) < 2:
+                continue
+            flat = []
+            for x, y in outer:
+                X, Y = self._to_screen(x, y); flat += [X, Y]
+            rid = str(sh.get("id") or sh.get("unique_id") or f"shaft_{id(sh)}")
+            pid = c.create_polygon(flat, outline="#1D4ED8", fill="#1E40AF", width=2, tags=("geom","shaft", rid))
+            self._id2canvas[rid] = ("shaft", pid)
+            self._canvas2rid[pid] = (rid, "shaft")
+            self._orig_fill[rid] = "#1E40AF"
+            self._orig_outline[rid] = ("#1D4ED8", 2)
+            for h in sh.get("inner_loops_xy_m", []):
+                flat_h = []
+                for x, y in h:
+                    X, Y = self._to_screen(x, y); flat_h += [X, Y]
+                c.create_polygon(flat_h, outline="#1D4ED8", fill="white", width=1, tags=("geom","shaft_hole"))
 
         for r in rooms:
             cx, cy = centroid_xy(r["outer_xy_m"]); X, Y = self._to_screen(cx, cy)
             c.create_text(X+6, Y+6, text=r.get("name",""), anchor="nw", font=("Arial",9), fill="#000")
+
+        for op in openings:
+            outer = op.get("outer_xy_m") or []
+            if not outer:
+                continue
+            cx, cy = centroid_xy(outer)
+            X, Y = self._to_screen(cx, cy)
+            label = op.get("name") or op.get("opening_type") or op.get("category") or ""
+            if label:
+                c.create_text(X, Y, text=label, anchor="center", font=("Arial",8), fill="#444")
+
+        for sh in shafts:
+            outer = sh.get("outer_xy_m") or []
+            if not outer:
+                continue
+            cx, cy = centroid_xy(outer)
+            X, Y = self._to_screen(cx, cy)
+            label = sh.get("name") or sh.get("label") or "Shaft"
+            if label:
+                c.create_text(X, Y, text=label, anchor="center", font=("Arial",8), fill="#E0F2FE")
 
         for rid in list(self._sel_ids):
             self._set_selected(rid, True)
