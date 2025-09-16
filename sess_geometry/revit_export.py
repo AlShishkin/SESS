@@ -746,7 +746,6 @@ def _flatten_params_simple(raw):
     flat = {}
     if not isinstance(raw, dict):
         return flat
-
     def _store(name, value):
         if isinstance(value, (int, float)):
             flat[str(name)] = round(float(value), 6)
@@ -754,7 +753,6 @@ def _flatten_params_simple(raw):
             flat[str(name)] = ""
         else:
             flat[str(name)] = value
-
     if "instance" in raw or "type" in raw:
         for block_name in ("instance", "type"):
             block = raw.get(block_name, {})
@@ -783,54 +781,44 @@ def _opening_from(src, opening_type, levels_map):
             outer_m = [[float(x)*FT_TO_M, float(y)*FT_TO_M] for x, y in outer_ft]
     if not outer_m:
         return None
-
     params = _flatten_params_simple(src.get("params"))
     geom = src.get("geom") or {}
-
     def _set_num(dst_key, value, metric_key=None, metric_factor=1.0):
         if isinstance(value, (int, float)):
             params.setdefault(dst_key, round(float(value), 6))
             if metric_key:
                 params.setdefault(metric_key, round(float(value) * metric_factor, 6))
-
     _set_num("width_ft", geom.get("width_ft"), "width_m", FT_TO_M)
     _set_num("height_ft", geom.get("height_ft"), "height_m", FT_TO_M)
     _set_num("host_thickness_ft", geom.get("host_thickness_ft"), "host_thickness_m", FT_TO_M)
     _set_num("area_ft2", geom.get("area_ft2"), "area_m2", FT2_TO_M2)
     _set_num("approx_face_area_ft2", geom.get("approx_face_area_ft2"), "approx_face_area_m2", FT2_TO_M2)
-
     z_rng = src.get("z_range_ft") or src.get("bbox_z_ft")
     if isinstance(z_rng, (list, tuple)) and len(z_rng) == 2:
         params.setdefault("z_min_ft", round(float(z_rng[0]), 6))
         params.setdefault("z_max_ft", round(float(z_rng[1]), 6))
         params.setdefault("z_min_m", round(float(z_rng[0]) * FT_TO_M, 6))
         params.setdefault("z_max_m", round(float(z_rng[1]) * FT_TO_M, 6))
-
     height_ft = src.get("height_ft")
     _set_num("height_ft", height_ft, "height_m", FT_TO_M)
-
     facing = src.get("facing_dir")
     if facing and "facing_dir" not in params:
         params["facing_dir"] = [round(float(x), 6) for x in facing]
     hand = src.get("hand_dir")
     if hand and "hand_dir" not in params:
         params["hand_dir"] = [round(float(x), 6) for x in hand]
-
     host_id = src.get("host_id")
     if host_id is not None:
         params.setdefault("host_id", str(host_id))
-
     link = src.get("in_link")
     if isinstance(link, dict):
         for k, v in link.items():
             params.setdefault(k, v)
-
     for rel in ("from_room", "to_room"):
         brief = (src.get(rel) or {}).get("brief") if isinstance(src.get(rel), dict) else None
         if isinstance(brief, dict):
             for k, v in brief.items():
-                params.setdefault(f"{rel}_{k}", v)
-
+                params.setdefault("%s_%s" % (rel, k), v)
     cat = src.get("category") or src.get("source_category") or ""
     if not opening_type:
         low = str(cat).lower()
@@ -840,7 +828,6 @@ def _opening_from(src, opening_type, levels_map):
             opening_type = "curtain_panel"
         else:
             opening_type = "window"
-
     level_id = src.get("level_id")
     level_name = ""
     if level_id is not None:
@@ -849,9 +836,7 @@ def _opening_from(src, opening_type, levels_map):
             level_name = info.get("name", "")
     if not level_name:
         level_name = params.get("Level", "")
-
     params.setdefault("source_category", src.get("source_category"))
-
     record = {
         "id": src.get("id"),
         "unique_id": src.get("unique_id"),
@@ -869,17 +854,17 @@ def _opening_from(src, opening_type, levels_map):
     return record
 
 def _build_openings(doors, windows, levels_map):
-    openings = []
+    openings_out = []
     for src in doors:
         rec = _opening_from(src, "door", levels_map)
         if rec:
-            openings.append(rec)
+            openings_out.append(rec)
     for src in windows:
         otype = "curtain_panel" if src.get("is_curtain_panel") else "window"
         rec = _opening_from(src, otype, levels_map)
         if rec:
-            openings.append(rec)
-    return openings
+            openings_out.append(rec)
+    return openings_out
 
 # ---------- UI ----------
 def _pick_boundary_location():
@@ -928,7 +913,7 @@ def main():
     windows = _collect_windows_all_docs(doc)
     shafts, shafts_by_level = _collect_shafts_all_docs(doc, levels_map)
 
-    openings = _build_openings(doors, windows, levels_map)
+    openings_all = _build_openings(doors, windows, levels_map)
 
     host_full = _user_model_path(doc)
     meta = {"doc_title": doc.Title,
@@ -946,15 +931,14 @@ def main():
            "units_note": "Internal length units are feet. Geometry exported as xy_ft and xy_m.",
            "meta": meta, "levels": levels_list,
            "rooms": rooms, "areas": areas, "doors": doors, "windows": windows,
-           "openings": openings, "shafts": shafts,
-           "shaft_openings_by_level": [{"level_id": lid, "openings": openings}
-                                        for lid, openings in sorted(shafts_by_level.items(), key=lambda kv: kv[0])]
-           }
+           "openings": openings_all, "shafts": shafts,
+           "shaft_openings_by_level": [{"level_id": lid, "openings": openings_lv}
+                                       for lid, openings_lv in sorted(shafts_by_level.items(), key=lambda kv: kv[0])]}
     sw = StreamWriter(path, False, UTF8Encoding(False))
     try: sw.Write(json.dumps(out, ensure_ascii=False, indent=2))
     finally: sw.Close()
     forms.alert("Export complete:\n{}\nRooms: {}\nAreas: {}\nDoors: {}\nWindows: {}\nOpenings: {}\nShaft levels: {}".format(
-        path, len(rooms), len(areas), len(doors), len(windows), len(openings), len(shafts_by_level)), title="REVIT_DATA_EXPORT")
+        path, len(rooms), len(areas), len(doors), len(windows), len(openings_all), len(shafts_by_level)), title="REVIT_DATA_EXPORT")
 
 if __name__ == "__main__":
     try: main()
