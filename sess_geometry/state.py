@@ -10,8 +10,10 @@ ALIAS_TO_PARAM = {
 
 DEFAULT_ROOM_WORK_COLS = ["id","name","BESS_level","BESS_Upper_level","BESS_Room_Height"]
 DEFAULT_AREA_WORK_COLS = ["id","name","BESS_level"]
+DEFAULT_OPENING_WORK_COLS = ["id","name","category","opening_type","BESS_level"]
 DEFAULT_ROOM_SRC_COLS  = ["id","level","name"]
 DEFAULT_AREA_SRC_COLS  = ["id","level","name"]
+DEFAULT_OPENING_SRC_COLS = ["id","level","name","category","opening_type"]
 
 class AppState:
     def __init__(self):
@@ -19,14 +21,18 @@ class AppState:
         self.base_levels = {}
         self.base_rooms = []
         self.base_areas = []
+        self.base_openings = []
         self.work_levels = {}
         self.work_rooms = []
         self.work_areas = []
+        self.work_openings = []
         self.selected_level = ""
         self.room_work_cols = DEFAULT_ROOM_WORK_COLS[:]
         self.area_work_cols = DEFAULT_AREA_WORK_COLS[:]
+        self.opening_work_cols = DEFAULT_OPENING_WORK_COLS[:]
         self.room_src_cols  = DEFAULT_ROOM_SRC_COLS[:]
         self.area_src_cols  = DEFAULT_AREA_SRC_COLS[:]
+        self.opening_src_cols = DEFAULT_OPENING_SRC_COLS[:]
 
     @staticmethod
     def levels_sorted_names(levels_dict):
@@ -39,13 +45,14 @@ class AppState:
     def _quantize(coords):
         return [[round(float(x), 2), round(float(y), 2)] for x, y in (coords or [])]
 
-    def set_source(self, meta, levels, rooms, areas):
+    def set_source(self, meta, levels, rooms, areas, openings):
         from copy import deepcopy  # локально на случай прямого вызова
 
         self.meta = meta
         self.base_levels = deepcopy(levels)
         self.base_rooms  = deepcopy(rooms)
         self.base_areas  = deepcopy(areas)
+        self.base_openings = deepcopy(openings)
 
         # требование: рабочие уровни = источнику
         self.work_levels = deepcopy(self.base_levels)
@@ -53,6 +60,7 @@ class AppState:
         # НОВОЕ: автокопия всех помещений и оболочек в рабочую модель
         self.work_rooms = [self._clone_room(r) for r in self.base_rooms]
         self.work_areas = [self._clone_area(a) for a in self.base_areas]
+        self.work_openings = [self._clone_opening(o) for o in self.base_openings]
 
         # выбрать первый уровень
         self.selected_level = self.levels_sorted_names(self.work_levels)[0] if self.work_levels else ""
@@ -96,6 +104,15 @@ class AppState:
         new["outer_xy_m"] = self._quantize(new.get("outer_xy_m", []))
         return new
 
+    def _clone_opening(self, src):
+        new = deepcopy(src)
+        prs = self.prefixed_params(new.get("params"))
+        prs["BESS_level"] = new.get("level", "")
+        new["params"] = prs
+        new["outer_xy_m"] = self._quantize(new.get("outer_xy_m", []))
+        new["inner_loops_xy_m"] = [self._quantize(loop) for loop in new.get("inner_loops_xy_m", [])]
+        return new
+
     def ensure_room_upper(self, room):
         prs = room.get("params") or {}
         base_name = prs.get("BESS_level") or room.get("level","") or ""
@@ -124,7 +141,11 @@ class AppState:
 
     def unique_id(self, base):
         base = str(base)
-        existing = {str(it.get("id","")) for it in self.work_rooms} | {str(it.get("id","")) for it in self.work_areas}
+        existing = (
+            {str(it.get("id","")) for it in self.work_rooms}
+            | {str(it.get("id","")) for it in self.work_areas}
+            | {str(it.get("id","")) for it in self.work_openings}
+        )
         if base not in existing:
             return base
         i = 1
@@ -178,9 +199,16 @@ class AppState:
     def remove_areas(self, ids):
         self.work_areas = [a for a in self.work_areas if str(a.get("id")) not in set(ids)]
 
+    def remove_openings(self, ids):
+        self.work_openings = [o for o in self.work_openings if str(o.get("id")) not in set(ids)]
+
+    def reset_openings(self):
+        self.work_openings = [self._clone_opening(o) for o in self.base_openings]
+
     def delete_levels(self, level_names):
         self.work_rooms = [r for r in self.work_rooms if (r.get("params",{}).get("BESS_level","") not in level_names)]
         self.work_areas = [a for a in self.work_areas if (a.get("params",{}).get("BESS_level","") not in level_names)]
+        self.work_openings = [o for o in self.work_openings if (o.get("params",{}).get("BESS_level","") not in level_names)]
         for n in level_names:
             self.work_levels.pop(n, None)
         names = self.levels_sorted_names(self.work_levels)
