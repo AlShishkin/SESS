@@ -1794,24 +1794,113 @@ def _bbox_record(el, T=None):
         "center_m":[_roundf(c.X*FT_TO_M,3),_roundf(c.Y*FT_TO_M,3),_roundf(c.Z*FT_TO_M,3)]
     }
 
+def _door_footprint(el, T=None):
+    """Generate an oriented rectangle footprint for a door family instance."""
+
+    try:
+        if not isinstance(el, DB.FamilyInstance):
+            return None
+
+        center = _of_point(T, _bb_center(el))
+        facing = _of_vector(T, getattr(el, "FacingOrientation", None))
+        hand   = _of_vector(T, getattr(el, "HandOrientation", None))
+        if hand is None and facing is not None:
+            hand = _cross(DB.XYZ.BasisZ, facing)
+        if center is None or facing is None or hand is None:
+            return None
+
+        width_ft = _get_double_param_by(
+            el,
+            ['DOOR_WIDTH', 'FAMILY_WIDTH_PARAM', 'WIDTH'],
+            ['Width', 'Ширина', 'Ширина проема', 'Ширина проёма']
+        )
+        width_ft = abs(float(width_ft)) if width_ft else None
+
+        host_thk = None
+        try:
+            host = getattr(el, "Host", None)
+            if isinstance(host, DB.Wall):
+                host_thk = getattr(host, "Width", None)
+        except Exception:
+            host_thk = None
+
+        depth_ft = host_thk
+        if depth_ft in (None, 0.0):
+            depth_ft = _get_double_param_by(
+                el,
+                ['DOOR_THICKNESS', 'FAMILY_THICKNESS_PARAM', 'THICKNESS'],
+                ['Thickness', 'Толщина']
+            )
+        depth_ft = abs(float(depth_ft)) if depth_ft else None
+
+        bbox_size = _bb_size(el, T)
+        if not width_ft and bbox_size:
+            width_ft = max(bbox_size[0], bbox_size[1])
+        if not depth_ft and bbox_size:
+            depth_ft = min(bbox_size[0], bbox_size[1])
+
+        if not width_ft or not depth_ft or width_ft <= 1e-6 or depth_ft <= 1e-6:
+            return None
+
+        ring = _rect_footprint(center, hand, facing, width_ft, depth_ft)
+        if not ring:
+            return None
+
+        footprint = _footprint_record(ring)
+        if not footprint:
+            return None
+
+        area_ft2 = width_ft * depth_ft
+        footprint.update({
+            "width_ft": _roundf(width_ft, 4),
+            "height_ft": _roundf(depth_ft, 4),
+            "width_m": _roundf(width_ft * FT_TO_M, 3),
+            "height_m": _roundf(depth_ft * FT_TO_M, 3),
+            "real_width_ft": _roundf(width_ft, 4),
+            "real_width_m": _roundf(width_ft * FT_TO_M, 3),
+            "real_height_ft": _roundf(depth_ft, 4),
+            "real_height_m": _roundf(depth_ft * FT_TO_M, 3),
+            "area_ft2": _roundf(area_ft2, 4),
+            "area_m2": _roundf(area_ft2 * FT2_TO_M2, 3)
+        })
+
+        door_height_ft = _get_double_param_by(
+            el,
+            ['DOOR_HEIGHT', 'FAMILY_HEIGHT_PARAM', 'HEIGHT'],
+            ['Height', 'Высота', 'Высота проема', 'Высота проёма']
+        )
+        if door_height_ft:
+            footprint["door_height_ft"] = _roundf(door_height_ft, 4)
+            footprint["door_height_m"] = _roundf(door_height_ft * FT_TO_M, 3)
+
+        return footprint
+    except Exception:
+        return None
+
 def _create_element_footprint(el, T=None, category=""):
     """Создает footprint элемента для визуализации в SESS_geometry"""
     try:
         bb = el.get_BoundingBox(None)
         if not bb:
             return None
-            
+
         pmin = _of_point(T, bb.Min)
-        pmax = _of_point(T, bb.Max) 
+        pmax = _of_point(T, bb.Max)
         center = DB.XYZ((pmin.X + pmax.X) * 0.5, (pmin.Y + pmax.Y) * 0.5, (pmin.Z + pmax.Z) * 0.5)
-        
+
+        cat_lower = str(category or "").strip().lower()
+        if cat_lower == "doors":
+            oriented = _door_footprint(el, T)
+            if oriented:
+                return oriented
+
         # Получаем реальные размеры элемента из параметров
         width_ft = None
         height_ft = None
-        
-        if category == "Doors":
+
+        if cat_lower == "doors":
             # Для дверей извлекаем ТОЛЬКО ширину из параметров (высота не нужна для плана)
-            width_ft = _get_double_param_by(el, 
+            width_ft = _get_double_param_by(el,
                 ['DOOR_WIDTH', 'FAMILY_WIDTH_PARAM', 'WIDTH'],
                 ['Width', 'Ширина', 'Ширина проема', 'Ширина проёма'])
             # Для плана используем толщину стены или фиксированную глубину двери
@@ -1821,8 +1910,8 @@ def _create_element_footprint(el, T=None, category=""):
             if not height_ft:
                 # Если толщина не найдена, используем стандартную толщину двери
                 height_ft = 0.25  # ~7.5 см - стандартная толщина двери
-                
-        elif category == "Windows":
+
+        elif cat_lower == "windows":
             # Для окон аналогично
             width_ft = _get_double_param_by(el,
                 ['WINDOW_WIDTH', 'FAMILY_WIDTH_PARAM', 'WIDTH'],
@@ -1830,8 +1919,8 @@ def _create_element_footprint(el, T=None, category=""):
             height_ft = _get_double_param_by(el,
                 ['WINDOW_HEIGHT', 'FAMILY_HEIGHT_PARAM', 'HEIGHT'],
                 ['Height', 'Высота'])
-                
-        elif category == "Curtain Panels":
+
+        elif cat_lower == "curtain panels":
             # Для панелей используем bbox, но ограничиваем размеры
             bbox_width = abs(pmax.X - pmin.X)
             bbox_height = abs(pmax.Y - pmin.Y)
