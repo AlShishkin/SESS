@@ -116,7 +116,49 @@ def load_bess_export(path):
 
     rooms = _norm_roomlike(data.get("rooms", []))
     areas = _norm_roomlike(data.get("areas", []))
-    
+
+    def _as_point(pt, *, factor=1.0):
+        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+            try:
+                x = float(pt[0]) * factor
+                y = float(pt[1]) * factor
+                z = float(pt[2]) * factor if len(pt) >= 3 else 0.0
+                return [x, y, z]
+            except Exception:
+                return None
+        return None
+
+    def _bbox_metrics(bbox):
+        if not isinstance(bbox, dict):
+            return None, None, None
+        min_m = _as_point(bbox.get("min_m"))
+        max_m = _as_point(bbox.get("max_m"))
+        if not (min_m and max_m):
+            min_ft = _as_point(bbox.get("min_ft"), factor=FT_TO_M)
+            max_ft = _as_point(bbox.get("max_ft"), factor=FT_TO_M)
+            if min_ft and max_ft:
+                min_m, max_m = min_ft, max_ft
+        center_m = _as_point(bbox.get("center_m"))
+        if not center_m:
+            center_ft = _as_point(bbox.get("center_ft"), factor=FT_TO_M)
+            if center_ft:
+                center_m = center_ft
+        return min_m, max_m, center_m
+
+    def _bbox_poly_xy(bbox):
+        min_m, max_m, _ = _bbox_metrics(bbox)
+        if not (min_m and max_m):
+            return None
+        try:
+            x0 = min(min_m[0], max_m[0])
+            x1 = max(min_m[0], max_m[0])
+            y0 = min(min_m[1], max_m[1])
+            y1 = max(min_m[1], max_m[1])
+        except Exception:
+            return None
+        rect = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+        return _norm_poly(rect)
+
     def _poly_from_opening(obj):
         outer, holes = _poly_from_item(obj)
         if outer:
@@ -139,7 +181,10 @@ def load_bess_export(path):
                 for h in holes:
                     if isinstance(h, list) and len(h) >= 3:
                         out_holes.append([[float(x)*FT_TO_M, float(y)*FT_TO_M] for x, y in h])
-            return _norm_poly(out_outer), [_norm_poly(h) for h in out_holes]
+                return _norm_poly(out_outer), [_norm_poly(h) for h in out_holes]
+        bbox_poly = _bbox_poly_xy(obj.get("bbox"))
+        if bbox_poly:
+            return bbox_poly, []
         return None, []
 
     def _poly_from_loop_record(loop):
@@ -206,18 +251,88 @@ def load_bess_export(path):
             level_id = op.get("level_id")
             if level_id is not None and "level_id" not in params:
                 params["level_id"] = str(level_id)
+
+            bucket = op.get("__bucket") or op.get("bucket")
+            category_name = op.get("category") or op.get("source_category") or ""
+            cat_lower = str(category_name).lower()
+            if bucket is None:
+                if "door" in cat_lower:
+                    bucket = "doors"
+                elif "window" in cat_lower:
+                    bucket = "windows"
+                elif any(key in cat_lower for key in ("panel", "glaz", "wall")):
+                    bucket = "glazing"
+            if bucket and "BESS_source_bucket" not in params:
+                params["BESS_source_bucket"] = bucket
+            if category_name and "BESS_selection_category" not in params:
+                params["BESS_selection_category"] = category_name
+            type_name = op.get("type_name")
+            if type_name not in (None, "") and "type_name" not in params:
+                params["type_name"] = type_name
+
+            bbox = op.get("bbox")
+            min_m, max_m, center_m = _bbox_metrics(bbox)
+            min_vals = max_vals = None
+            size_m = None
+            if min_m and max_m:
+                min_vals = [min(min_m[i], max_m[i]) for i in range(3)]
+                max_vals = [max(min_m[i], max_m[i]) for i in range(3)]
+                size_m = [max_vals[i] - min_vals[i] for i in range(3)]
+                size_ft = [val / FT_TO_M for val in size_m]
+
+                def _store_point(prefix, coords):
+                    if not coords or len(coords) < 3:
+                        return
+                    params.setdefault(f"{prefix}_x_m", r2(coords[0]))
+                    params.setdefault(f"{prefix}_y_m", r2(coords[1]))
+                    params.setdefault(f"{prefix}_z_m", r2(coords[2]))
+                    params.setdefault(f"{prefix}_x_ft", r2(coords[0] / FT_TO_M))
+                    params.setdefault(f"{prefix}_y_ft", r2(coords[1] / FT_TO_M))
+                    params.setdefault(f"{prefix}_z_ft", r2(coords[2] / FT_TO_M))
+
+                _store_point("bbox_min", min_vals)
+                _store_point("bbox_max", max_vals)
+                params.setdefault("bbox_size_x_m", r2(size_m[0]))
+                params.setdefault("bbox_size_y_m", r2(size_m[1]))
+                params.setdefault("bbox_size_z_m", r2(size_m[2]))
+                params.setdefault("bbox_size_x_ft", r2(size_ft[0]))
+                params.setdefault("bbox_size_y_ft", r2(size_ft[1]))
+                params.setdefault("bbox_size_z_ft", r2(size_ft[2]))
+                area_m2 = size_m[0] * size_m[1]
+                if abs(area_m2) > 1e-9:
+                    params.setdefault("bbox_area_m2", r2(area_m2))
+                    params.setdefault("bbox_area_ft2", r2(area_m2 / FT2_TO_M2))
+                if abs(size_m[2]) > 1e-9:
+                    params.setdefault("height_m", r2(size_m[2]))
+                    params.setdefault("height_ft", r2(size_m[2] / FT_TO_M))
+            if center_m and len(center_m) >= 3:
+                params.setdefault("bbox_center_x_m", r2(center_m[0]))
+                params.setdefault("bbox_center_y_m", r2(center_m[1]))
+                params.setdefault("bbox_center_z_m", r2(center_m[2]))
+                params.setdefault("bbox_center_x_ft", r2(center_m[0] / FT_TO_M))
+                params.setdefault("bbox_center_y_ft", r2(center_m[1] / FT_TO_M))
+                params.setdefault("bbox_center_z_ft", r2(center_m[2] / FT_TO_M))
+
             z_rng = op.get("z_range_ft") or op.get("bbox_z_ft")
             if isinstance(z_rng, (list, tuple)) and len(z_rng) == 2:
                 params.setdefault("z_min_ft", r2(float(z_rng[0])))
                 params.setdefault("z_max_ft", r2(float(z_rng[1])))
                 params.setdefault("z_min_m", r2(float(z_rng[0]) * FT_TO_M))
                 params.setdefault("z_max_m", r2(float(z_rng[1]) * FT_TO_M))
+            elif min_vals and max_vals:
+                params.setdefault("z_min_m", r2(min_vals[2]))
+                params.setdefault("z_max_m", r2(max_vals[2]))
+                params.setdefault("z_min_ft", r2(min_vals[2] / FT_TO_M))
+                params.setdefault("z_max_ft", r2(max_vals[2] / FT_TO_M))
+
             geom = op.get("geom") or {}
+
             def _set_num(dst_key, value, *, metric_key=None, metric_factor=1.0):
                 if isinstance(value, (int, float)):
                     params.setdefault(dst_key, r2(float(value)))
                     if metric_key:
                         params.setdefault(metric_key, r2(float(value) * metric_factor))
+
             _set_num("width_ft", op.get("width_ft"), metric_key="width_m", metric_factor=FT_TO_M)
             _set_num("width_ft", geom.get("width_ft"), metric_key="width_m", metric_factor=FT_TO_M)
             _set_num("height_ft", op.get("height_ft"), metric_key="height_m", metric_factor=FT_TO_M)
@@ -225,6 +340,7 @@ def load_bess_export(path):
             _set_num("host_thickness_ft", geom.get("host_thickness_ft"), metric_key="host_thickness_m", metric_factor=FT_TO_M)
             _set_num("area_ft2", geom.get("area_ft2"), metric_key="area_m2", metric_factor=FT2_TO_M2)
             _set_num("approx_face_area_ft2", geom.get("approx_face_area_ft2"), metric_key="approx_face_area_m2", metric_factor=FT2_TO_M2)
+
             facing = op.get("facing_dir")
             if isinstance(facing, (list, tuple)) and facing and "facing_dir" not in params:
                 params["facing_dir"] = [r2(float(x)) for x in facing]
@@ -245,28 +361,47 @@ def load_bess_export(path):
                     if isinstance(brief, dict):
                         for k, v in brief.items():
                             params.setdefault(f"{rel}_{k}", v)
+
             from_label = _room_label_from_params(params, "from_room")
             to_label = _room_label_from_params(params, "to_room")
             params["from_room"] = from_label
             params["to_room"] = to_label
+
             otype = op.get("opening_type")
             if not otype:
-                cat = str(op.get("category") or op.get("source_category") or "").lower()
-                if "door" in cat:
+                if bucket == "doors":
                     otype = "door"
-                elif "window" in cat:
+                elif bucket == "windows":
                     otype = "window"
-                elif "panel" in cat:
-                    otype = "curtain_panel"
+                elif bucket == "glazing":
+                    if "panel" in cat_lower:
+                        otype = "curtain_panel"
+                    elif "window" in cat_lower:
+                        otype = "window"
+                    elif "wall" in cat_lower:
+                        otype = "wall"
+                    else:
+                        otype = "glazing"
                 else:
-                    otype = ""
+                    if "door" in cat_lower:
+                        otype = "door"
+                    elif "window" in cat_lower:
+                        otype = "window"
+                    elif "panel" in cat_lower:
+                        otype = "curtain_panel"
+                    else:
+                        otype = ""
+
+            name = op.get("name") or op.get("symbol_name") or type_name or category_name or op.get("opening_type") or bucket or ""
+            label = op.get("label") or type_name or category_name or bucket or ""
+
             rec = {
-                "id": str(op.get("id","")),
+                "id": str(op.get("id", "")),
                 "level": str(op.get("level") or op.get("level_name") or params.get("Level", "")),
-                "name": op.get("name") or op.get("symbol_name") or op.get("category") or op.get("opening_type") or "",
+                "name": name,
                 "number": op.get("number", ""),
-                "label": op.get("label", "") or op.get("category", ""),
-                "category": op.get("category", ""),
+                "label": label,
+                "category": category_name,
                 "opening_type": otype,
                 "symbol_name": op.get("symbol_name", ""),
                 "unique_id": op.get("unique_id", ""),
@@ -279,7 +414,23 @@ def load_bess_export(path):
             dst.append(rec)
         return dst
 
-    openings = _norm_openings(data.get("openings", []) or (data.get("doors", []) + data.get("windows", [])))
+    raw_openings = data.get("openings")
+    openings_src = []
+    if isinstance(raw_openings, list) and raw_openings:
+        openings_src = raw_openings
+    else:
+        for bucket_name in ("doors", "windows", "glazing"):
+            bucket_items = data.get(bucket_name)
+            if not isinstance(bucket_items, list):
+                continue
+            for item in bucket_items:
+                if isinstance(item, dict):
+                    cloned = dict(item)
+                    cloned["__bucket"] = bucket_name
+                    openings_src.append(cloned)
+        if not openings_src and isinstance(raw_openings, list):
+            openings_src = raw_openings
+    openings = _norm_openings(openings_src)
 
     shaft_details = {}
     raw_shafts = data.get("shafts", [])
@@ -418,7 +569,21 @@ def load_bess_export(path):
                 }
                 shafts_by_level.setdefault(str(lvl), []).append(rec)
 
-    meta = {"version": data.get("version","bess-export-1"), "units": "Meters", "project": data.get("project", {})}
+    version = data.get("version", "bess-export-1")
+    meta = {"version": version, "units": "Meters"}
+    base_meta = data.get("meta")
+    if isinstance(base_meta, dict):
+        meta.update(base_meta)
+    meta["version"] = version
+    project = data.get("project")
+    if isinstance(project, dict) and "project" not in meta:
+        meta["project"] = project
+    filters_info = data.get("filters")
+    if isinstance(filters_info, dict):
+        meta["filters"] = filters_info
+    units_note = data.get("units_note")
+    if units_note not in (None, ""):
+        meta["units_note"] = units_note
     return meta, levels, rooms, areas, openings, shafts_by_level
 
 def save_work_geometry(path, meta, work_levels, work_rooms, work_areas, work_openings=None, work_shafts=None):
