@@ -30,10 +30,17 @@ from System.Windows.Forms import (
     Button, FlowLayoutPanel, DockStyle, SaveFileDialog, DialogResult, FormStartPosition,
     FlowDirection, DataGridViewAutoSizeColumnsMode, Label, CheckBox, TableLayoutPanel,
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     ColumnStyle, SizeType, ComboBox, ComboBoxStyle
 )
 from System.Drawing import Size, Color, ContentAlignment
 import json, os, re
+=======
+    ColumnStyle, SizeType
+)
+from System.Drawing import Size, Color, ContentAlignment
+import json, os
+>>>>>>> Stashed changes
 =======
     ColumnStyle, SizeType
 )
@@ -47,7 +54,11 @@ doc = revit.doc
 logger = script.get_logger()
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 # ===== настройки/пороговые =====
+=======
+# ---------------- Constants ----------------
+>>>>>>> Stashed changes
 =======
 # ---------------- Constants ----------------
 >>>>>>> Stashed changes
@@ -62,6 +73,7 @@ ROUND_M_DEC   = 3
 ROUND_FT_DEC  = 4
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 # валидные диапазоны (в футах)
 W_MIN_FT, W_MAX_FT = 1.0, 20.0        # ширина дверей/окон 0.3–6 м
 H_MIN_FT, H_MAX_FT = 5.0, 40.0        # высота 1.5–12 м
@@ -72,6 +84,8 @@ def _normalize(v):
     try: return v.Normalize()
     except: return v
 =======
+=======
+>>>>>>> Stashed changes
 # ---------------- Math / Transform helpers ----------------
 def _add(p, v): return DB.XYZ(p.X + v.X, p.Y + v.Y, p.Z + v.Z)
 def _sub(a, b): return DB.XYZ(a.X - b.X, a.Y - b.Y, a.Z - b.Z)
@@ -92,6 +106,9 @@ def _of_vector(T, v):
 <<<<<<< Updated upstream
 =======
 
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 def _roundf(x, dec): return round(x, dec) if x is not None else None
 def _xy_ft_from_pts(pts):
@@ -124,6 +141,7 @@ def _param_record(p):
         if not name: return None
         st=p.StorageType; vs=p.AsValueString(); raw=None
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         if st==DB.StorageType.String:   raw=p.AsString();  vs=raw if vs is None else vs
         elif st==DB.StorageType.Integer: raw=p.AsInteger(); vs=str(raw) if vs is None else vs
         elif st==DB.StorageType.Double:  raw=p.AsDouble();  vs="" if vs is None else vs
@@ -132,6 +150,8 @@ def _param_record(p):
             vs=(str(raw) if raw is not None else "") if vs is None else vs
         else: vs="" if vs is None else vs
 =======
+=======
+>>>>>>> Stashed changes
         if st==DB.StorageType.String:
             raw=p.AsString(); vs=raw if vs is None else vs
         elif st==DB.StorageType.Integer:
@@ -143,14 +163,20 @@ def _param_record(p):
             vs=(str(raw) if raw is not None else "") if vs is None else vs
         else:
             vs="" if vs is None else vs
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
         return name, {"display":vs, "raw_internal":raw,
                       "id": getattr(p,"Id",None).IntegerValue if getattr(p,"Id",None) else None,
                       "is_shared": getattr(p,"IsShared",False),
                       "guid": str(getattr(p,"GUID",None)) if getattr(p,"IsShared",False) else None,
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
                       "storage_type": str(p.StorageType)}
 =======
+=======
+>>>>>>> Stashed changes
                       "storage_type": _storage_name(st)}
 >>>>>>> Stashed changes
     except: return None
@@ -177,7 +203,11 @@ def _collect_all_params(el, doc_):
     return res
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 # ===== документы и линки =====
+=======
+# ---------------- Doc sources ----------------
+>>>>>>> Stashed changes
 =======
 # ---------------- Doc sources ----------------
 >>>>>>> Stashed changes
@@ -194,8 +224,11 @@ def _user_model_path(document):
     return document.PathName or ""
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 def _doc_key(document): return _user_model_path(document) or document.Title
 
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 def _docs_sources(document):
@@ -212,6 +245,7 @@ def _all_levels_map(document):
         m[lv.Id.IntegerValue]={"name":lv.Name,"elevation_ft":elev,"elevation_m":elev*FT_TO_M}
     return m
 
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
 # ===== Rooms (как раньше, с back-compat полями) =====
 def _signed_area_xy_ft(pts):
@@ -628,6 +662,8 @@ def _type_name(fi):
     except: pass
     return ""
 =======
+=======
+>>>>>>> Stashed changes
 # ---------------- Rooms (geometry as before) ----------------
 def _signed_area_xy_ft(pts):
     a=0.0
@@ -781,6 +817,9 @@ def _rect_footprint(center, x_dir, y_dir, x_len_ft, y_len_ft):
 def _footprint_record(ring):
     if not ring: return None
     return {"xy_ft":_xy_ft_from_pts(ring),"xy_m":_xy_m_from_pts(ring)}
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 
 def _element_typename(el, sdoc):
@@ -788,6 +827,7 @@ def _element_typename(el, sdoc):
         if isinstance(el, DB.Wall):
             wt = sdoc.GetElement(el.GetTypeId()); return wt.Name if wt else ""
         if isinstance(el, DB.FamilyInstance):
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
             return _type_name(el)
     except: pass
@@ -1161,6 +1201,15 @@ def _pick_save_path():
     return ""
 >>>>>>> Stashed changes
 
+=======
+            sym = el.Symbol
+            if sym:
+                p = sym.get_Parameter(DB.BuiltInParameter.SYMBOL_NAME_PARAM)
+                return p.AsString() if p else getattr(sym,"Name","")
+    except: pass
+    return ""
+
+>>>>>>> Stashed changes
 # ---------------- Type tables ----------------
 def _flatten_params_simple(raw_dict):
     if not isinstance(raw_dict, dict): return "{}"
@@ -1565,6 +1614,7 @@ def _pick_save_path():
 def _meta(levels_map):
     host_full=_user_model_path(doc)
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     return {"doc_title":doc.Title,"doc_full_path":host_full,"doc_dir":os.path.dirname(host_full) if host_full else "",
             "export_time":datetime.utcnow().isoformat(),
             "links":[{"instance_id":li.Id.IntegerValue,"doc_title":ldoc.Title,"doc_full_path":_user_model_path(ldoc)}
@@ -1581,6 +1631,8 @@ if __name__=="__main__":
     except Exception as ex:
         TaskDialog.Show("REVIT_DATA_EXPORT","Export failed:\n{}".format(ex))
 =======
+=======
+>>>>>>> Stashed changes
     return {
         "doc_title": doc.Title,
         "doc_full_path": host_full,
@@ -1604,4 +1656,7 @@ if __name__ == "__main__":
         main()
     except Exception as ex:
         TaskDialog.Show("REVIT_DATA_EXPORT", "Export failed:\n{}".format(ex))
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
