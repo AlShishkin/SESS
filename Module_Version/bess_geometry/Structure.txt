@@ -1,0 +1,27 @@
+Здесь будем обсуждать общую структуру программы и идеи. ВЫгружу палн по разработке BESS_Geometry
+bess_geometry/
+├── init.py
+├── main.py
+├── main_app.py                    # Будущая точка входа (создать)
+│
+├── ui/                           # Пользовательский интерфейс
+│   ├── init.py               # Создать
+│   ├── geometry_canvas.py        # ✅ СОЗДАН - Компонент визуализации
+│   ├── main_window.py           # Создать в фазе 3
+│   └── dialogs/                 # Создать в фазе 4
+│       ├── init.py
+│       ├── energy_analysis.py
+│       └── room_editor.py
+│
+├── core/                        # Ядро бизнес-логики
+│   ├── init.py              # Создать
+│   ├── spatial_processor.py    # ✅ СОЗДАН - Геометрический процессор
+│   ├── file_manager.py         # Создать в фазе 2
+│   └── geometry_operations.py  # Создать в фазе 2
+│
+├── controllers/                 # Контроллеры (создать в фазе 3)
+│   ├── init.py
+│   ├── main_controller.py
+│   └── canvas_controller.py
+│
+└── ... (остальные модули без изменений)
